@@ -152,7 +152,26 @@ function humanizeError(code){
     MAX_CATEGORY_REACHED: 'Maksimal 3 kategori.',
     FORBIDDEN_NOT_WORKSPACE_MANAGER: 'Anda tidak memiliki hak admin di workspace ini.'
   };
-  return map[code] || code;
+  if (map[code]) return map[code];
+  if ((code || '').includes('Non-JSON response from GAS')) {
+    return 'Server arsip (Google Apps Script) belum siap merespons. Biasanya karena deployment GAS belum di-update ke versi terbaru, atau izin akses Google Drive belum disetujui ulang setelah ada fitur baru.';
+  }
+  if ((code || '').includes('Failed to parse GAS response')) {
+    return 'Respons dari server arsip tidak terbaca. Coba muat ulang halaman.';
+  }
+  return code;
+}
+
+function errorCardHtml_(message, retryFnName){
+  return `
+    <div class="bg-white border border-red-200 rounded-xl p-6 text-center max-w-lg mx-auto mt-6">
+      <div class="w-12 h-12 mx-auto bg-red-50 rounded-full flex items-center justify-center mb-3">
+        <i class="fa-solid fa-triangle-exclamation text-red-500"></i>
+      </div>
+      <div class="font-semibold text-slate-700 mb-1">Gagal memuat data</div>
+      <p class="text-sm text-slate-500 mb-4">${message}</p>
+      ${retryFnName ? `<button onclick="${retryFnName}()" class="px-4 py-2 text-sm bg-brand-600 hover:bg-brand-700 text-white rounded-lg"><i class="fa-solid fa-rotate-right mr-1"></i>Coba Lagi</button>` : ''}
+    </div>`;
 }
 
 /* ============== DASHBOARD SHELL ============== */
@@ -708,33 +727,85 @@ async function openManageWorkspaceModal(workspaceId){
 
 /* ============== DASHBOARD STATS ============== */
 async function renderDashboardStats(){
-  $('#mainContent').innerHTML = `<div class="flex items-center justify-center py-20 text-slate-400"><i class="fa-solid fa-spinner fa-spin text-2xl"></i></div>`;
-  let stats;
-  try { stats = await callApi('getDashboardStats', { email: state.user.email }); }
-  catch (e) { $('#mainContent').innerHTML = `<div class="text-red-500 text-sm">${humanizeError(e.message)}</div>`; return; }
-
-  const catRows = Object.entries(stats.byCategory || {}).map(([k,v]) => `<div class="flex items-center justify-between text-sm py-1"><span>${k||'(tanpa kategori)'}</span><span class="font-semibold">${v}</span></div>`).join('') || '<div class="text-slate-400 text-sm">Belum ada data</div>';
-  const yearRows = Object.entries(stats.byYear || {}).sort().reverse().map(([k,v]) => `<div class="flex items-center justify-between text-sm py-1"><span>${k}</span><span class="font-semibold">${v}</span></div>`).join('') || '<div class="text-slate-400 text-sm">Belum ada data</div>';
-
   $('#mainContent').innerHTML = `
-    <h2 class="text-xl font-bold mb-5">Dashboard</h2>
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Total Arsip</div><div class="text-2xl font-bold text-brand-700">${stats.totalArchives}</div></div>
-      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Ukuran Total</div><div class="text-2xl font-bold text-brand-700">${formatBytes(stats.totalSizeBytes)}</div></div>
-      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Workspace Diikuti</div><div class="text-2xl font-bold text-brand-700">${stats.totalWorkspaces}</div></div>
-      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Di Sampah</div><div class="text-2xl font-bold text-amber-600">${stats.trashedCount}</div></div>
-      ${stats.totalUsers !== undefined ? `<div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Total User (Sistem)</div><div class="text-2xl font-bold text-slate-700">${stats.totalUsers}</div></div>` : ''}
-      ${stats.totalAllArchives !== undefined ? `<div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Total Arsip (Sistem)</div><div class="text-2xl font-bold text-slate-700">${stats.totalAllArchives}</div></div>` : ''}
+    <div class="flex items-center justify-between mb-5">
+      <div><h2 class="text-lg sm:text-xl font-bold text-slate-800">Dashboard</h2><p class="text-xs text-slate-400">Ikhtisar sistem arsip Anda</p></div>
+    </div>
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+      ${[1,2,3,4].map(()=>`<div class="bg-white border rounded-xl p-4 animate-pulse"><div class="h-3 w-16 bg-slate-200 rounded mb-3"></div><div class="h-7 w-12 bg-slate-200 rounded"></div></div>`).join('')}
     </div>
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div class="bg-white border rounded-xl p-4">
-        <div class="font-semibold text-sm mb-2">Arsip per Kategori</div>${catRows}
+      <div class="bg-white border rounded-xl p-4 animate-pulse h-40"></div>
+      <div class="bg-white border rounded-xl p-4 animate-pulse h-40"></div>
+    </div>`;
+
+  let stats;
+  try {
+    stats = await callApi('getDashboardStats', { email: state.user.email });
+  } catch (e) {
+    $('#mainContent').innerHTML = `
+      <div class="flex items-center justify-between mb-5">
+        <div><h2 class="text-lg sm:text-xl font-bold text-slate-800">Dashboard</h2></div>
       </div>
-      <div class="bg-white border rounded-xl p-4">
-        <div class="font-semibold text-sm mb-2">Arsip per Tahun</div>${yearRows}
-      </div>
+      <div class="bg-white border border-red-200 rounded-xl p-6 text-center max-w-md mx-auto">
+        <div class="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-3">
+          <i class="fa-solid fa-triangle-exclamation text-red-500 text-xl"></i>
+        </div>
+        <div class="font-semibold text-slate-700 mb-1">Gagal memuat dashboard</div>
+        <div class="text-sm text-slate-500 mb-4">${e.message.length > 120 ? e.message.slice(0,120)+'…' : e.message}</div>
+        <div class="text-xs text-slate-400 mb-4 bg-slate-50 rounded-lg p-3 text-left">
+          <strong>Kemungkinan penyebab:</strong><br>
+          • Deployment GAS belum di-update ke versi terbaru (fungsi <code>getDashboardStats</code> belum ada)<br>
+          • Perlu otorisasi ulang: buka URL GAS <code>/exec</code> langsung di browser<br>
+          • Timeout — coba klik Coba Lagi
+        </div>
+        <button id="btnRetryDash" class="bg-brand-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-brand-700">
+          <i class="fa-solid fa-rotate-right mr-1"></i>Coba Lagi
+        </button>
+      </div>`;
+    if ($('#btnRetryDash')) $('#btnRetryDash').onclick = renderDashboardStats;
+    return;
+  }
+
+  const catRows = Object.entries(stats.byCategory || {}).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `
+    <div class="flex items-center gap-2 py-1.5">
+      <div class="text-sm flex-1 truncate">${k||'(tanpa kategori)'}</div>
+      <div class="text-xs text-slate-400 w-6 text-right">${v}</div>
+      <div class="w-24 bg-slate-100 rounded-full h-1.5"><div class="bg-brand-500 h-1.5 rounded-full" style="width:${Math.round(v/(stats.totalArchives||1)*100)}%"></div></div>
+    </div>`).join('') || '<div class="text-slate-400 text-sm py-2">Belum ada data</div>';
+
+  const yearRows = Object.entries(stats.byYear || {}).sort((a,b)=>b[0]-a[0]).map(([k,v]) => `
+    <div class="flex items-center gap-2 py-1.5">
+      <div class="text-sm font-medium w-12">${k}</div>
+      <div class="flex-1 bg-slate-100 rounded-full h-1.5"><div class="bg-green-500 h-1.5 rounded-full" style="width:${Math.round(v/(stats.totalArchives||1)*100)}%"></div></div>
+      <div class="text-xs text-slate-400 w-6 text-right">${v}</div>
+    </div>`).join('') || '<div class="text-slate-400 text-sm py-2">Belum ada data</div>';
+
+  const adminCards = stats.totalUsers !== undefined ? `
+    <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400 mb-1">Total User (Sistem)</div><div class="text-2xl font-bold text-slate-700">${stats.totalUsers}</div>
+      <div class="mt-2 flex flex-wrap gap-1">${Object.entries(stats.statusBreakdown||{}).map(([k,v])=>`<span class="text-[10px] px-1.5 py-0.5 rounded-full ${statusBadgeClass(k)}">${k}: ${v}</span>`).join('')}</div>
+    </div>
+    <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400 mb-1">Total Arsip (Sistem)</div><div class="text-2xl font-bold text-slate-700">${stats.totalAllArchives}</div></div>
+  ` : '';
+
+  $('#mainContent').innerHTML = `
+    <div class="flex items-center justify-between mb-5">
+      <div><h2 class="text-lg sm:text-xl font-bold text-slate-800">Dashboard</h2><p class="text-xs text-slate-400">Ikhtisar sistem arsip Anda</p></div>
+      <button id="btnRefreshDash" class="text-sm text-slate-400 hover:text-brand-600"><i class="fa-solid fa-rotate-right"></i></button>
+    </div>
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400 mb-1">Total Arsip</div><div class="text-2xl font-bold text-brand-700">${stats.totalArchives}</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400 mb-1">Ukuran Total</div><div class="text-2xl font-bold text-brand-700">${formatBytes(stats.totalSizeBytes)}</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400 mb-1">Workspace Diikuti</div><div class="text-2xl font-bold text-brand-700">${stats.totalWorkspaces}</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400 mb-1">Di Sampah</div><div class="text-2xl font-bold text-amber-600">${stats.trashedCount}</div></div>
+      ${adminCards}
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="bg-white border rounded-xl p-4"><div class="font-semibold text-sm mb-3">Arsip per Kategori</div>${catRows}</div>
+      <div class="bg-white border rounded-xl p-4"><div class="font-semibold text-sm mb-3">Arsip per Tahun</div>${yearRows}</div>
     </div>
   `;
+  if ($('#btnRefreshDash')) $('#btnRefreshDash').onclick = renderDashboardStats;
 }
 
 function formatBytes(n){
