@@ -68,7 +68,10 @@ let state = {
   currentWorkspace: null,
   page: 1,
   pageSize: 10,
-  search: ''
+  search: '',
+  filterCategory: '',
+  filterYear: '',
+  selectedIds: new Set()
 };
 
 function setUser(u){ state.user = u; localStorage.setItem('yori_user', JSON.stringify(u)); }
@@ -157,15 +160,17 @@ function renderDashboard(){
   const u = state.user;
   const suspended = u.status === 'suspended';
   appEl().innerHTML = `
-  <div class="flex h-screen overflow-hidden">
-    <aside class="w-72 bg-white border-r flex flex-col shrink-0">
+  <div class="flex h-screen overflow-hidden relative">
+    <div id="sidebarOverlay" class="fixed inset-0 bg-black/40 z-30 hidden lg:hidden"></div>
+    <aside id="sidebar" class="w-72 bg-white border-r flex flex-col shrink-0 fixed lg:static inset-y-0 left-0 z-40 -translate-x-full lg:translate-x-0 transition-transform duration-200 h-full">
       <div class="p-5 border-b flex items-center gap-3">
-        <div class="w-10 h-10 bg-brand-600 rounded-lg flex items-center justify-center"><i class="fa-solid fa-box-archive text-white"></i></div>
-        <div><div class="font-bold text-slate-800 leading-tight">Yor.iAPP</div><div class="text-xs text-slate-400">Enterprise Archive</div></div>
+        <div class="w-10 h-10 bg-brand-600 rounded-lg flex items-center justify-center shrink-0"><i class="fa-solid fa-box-archive text-white"></i></div>
+        <div class="min-w-0"><div class="font-bold text-slate-800 leading-tight truncate">Yor.iAPP</div><div class="text-xs text-slate-400 truncate">Enterprise Archive</div></div>
+        <button id="btnCloseSidebar" class="ml-auto lg:hidden text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark text-lg"></i></button>
       </div>
       <div class="p-4 border-b">
         <div class="flex items-center gap-3">
-          <img src="${u.profilePic || 'https://api.dicebear.com/7.x/initials/svg?seed='+encodeURIComponent(u.username)}" class="w-10 h-10 rounded-full object-cover bg-slate-200" />
+          <img src="${u.profilePic || 'https://api.dicebear.com/7.x/initials/svg?seed='+encodeURIComponent(u.username)}" class="w-10 h-10 rounded-full object-cover bg-slate-200 shrink-0" />
           <div class="min-w-0">
             <div class="text-sm font-semibold truncate">${u.username}</div>
             <div class="text-xs text-slate-400 truncate">${u.email}</div>
@@ -178,13 +183,25 @@ function renderDashboard(){
         <button id="btnLogout" class="w-full flex items-center gap-2 text-sm text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg"><i class="fa-solid fa-right-from-bracket"></i>Keluar</button>
       </div>
     </aside>
-    <main class="flex-1 overflow-y-auto scrollbar-thin">
-      ${suspended ? `<div class="bg-red-600 text-white text-sm px-6 py-3 flex items-center gap-2"><i class="fa-solid fa-triangle-exclamation"></i> AKUN ANDA DI-SUSPEND / BERHENTI BERLANGGANAN. Anda hanya diizinkan mengunduh arsip yang sudah ada. Upload, Edit, dan Hapus dinonaktifkan.</div>` : ''}
-      <div id="mainContent" class="p-6"></div>
+    <main class="flex-1 overflow-y-auto scrollbar-thin min-w-0">
+      <div class="lg:hidden flex items-center gap-3 bg-white border-b px-4 py-3 sticky top-0 z-20">
+        <button id="btnOpenSidebar" class="text-slate-600"><i class="fa-solid fa-bars text-lg"></i></button>
+        <div class="font-bold text-slate-800 text-sm">Yor.iAPP</div>
+      </div>
+      ${suspended ? `<div class="bg-red-600 text-white text-xs sm:text-sm px-4 sm:px-6 py-3 flex items-center gap-2"><i class="fa-solid fa-triangle-exclamation"></i> AKUN ANDA DI-SUSPEND / BERHENTI BERLANGGANAN. Anda hanya diizinkan mengunduh arsip yang sudah ada.</div>` : ''}
+      <div id="mainContent" class="p-3 sm:p-6"></div>
     </main>
   </div>`;
 
   $('#btnLogout').onclick = logout;
+  const sidebar = $('#sidebar'), overlay = $('#sidebarOverlay');
+  const openSidebar = () => { sidebar.classList.remove('-translate-x-full'); overlay.classList.remove('hidden'); };
+  const closeSidebar = () => { sidebar.classList.add('-translate-x-full'); overlay.classList.add('hidden'); };
+  if ($('#btnOpenSidebar')) $('#btnOpenSidebar').onclick = openSidebar;
+  if ($('#btnCloseSidebar')) $('#btnCloseSidebar').onclick = closeSidebar;
+  if (overlay) overlay.onclick = closeSidebar;
+  window.closeSidebarOnNav = () => { if (window.innerWidth < 1024) closeSidebar(); };
+
   renderSideNav();
   renderMainContent();
 }
@@ -219,7 +236,7 @@ function renderSideNav(){
   }
   $('#sideNav').innerHTML = html;
   $('#btnNewWorkspace').onclick = openCreateWorkspaceModal;
-  document.querySelectorAll('.navitem').forEach(b => b.onclick = () => { state.view = b.dataset.view; renderDashboard(); });
+  document.querySelectorAll('.navitem').forEach(b => b.onclick = () => { state.view = b.dataset.view; resetListState_(); renderDashboard(); });
   renderWorkspaceListSidebar();
   renderCategoryListSidebar();
 }
@@ -242,8 +259,13 @@ async function renderWorkspaceListSidebar(){
   document.querySelectorAll('[data-ws]').forEach(b => b.onclick = () => {
     state.view = b.dataset.ws;
     state.currentWorkspace = state.workspaces.find(w => w.workspaceId === b.dataset.ws);
+    resetListState_();
     renderDashboard();
   });
+}
+
+function resetListState_(){
+  state.page = 1; state.search = ''; state.filterCategory = ''; state.filterYear = ''; state.selectedIds = new Set();
 }
 
 function renderCategoryListSidebar(){
@@ -283,26 +305,35 @@ async function renderArchivesView(){
   const suspended = u.status === 'suspended';
   const isWorkspace = isWorkspaceView();
   const title = isWorkspace ? (state.currentWorkspace ? state.currentWorkspace.name : 'Workspace') : 'Arsip Pribadi';
+  state.selectedIds = new Set();
 
   $('#mainContent').innerHTML = `
-    <div class="flex items-center justify-between mb-5">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
       <div>
-        <h2 class="text-xl font-bold text-slate-800">${title}</h2>
-        <p class="text-sm text-slate-400">${isWorkspace ? 'Arsip kolaboratif workspace' : 'Arsip pribadi Anda'}</p>
+        <h2 class="text-lg sm:text-xl font-bold text-slate-800">${title}</h2>
+        <p class="text-xs sm:text-sm text-slate-400">${isWorkspace ? 'Arsip kolaboratif workspace' : 'Arsip pribadi Anda'}</p>
       </div>
-      <div class="flex gap-2">
-        ${isWorkspace ? `<button id="btnManageWs" class="px-3 py-2 text-sm border rounded-lg hover:bg-slate-50"><i class="fa-solid fa-users-gear mr-1"></i>Kelola Anggota</button>` : ''}
-        ${!suspended ? `<button id="btnUpload" class="px-3 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700"><i class="fa-solid fa-upload mr-1"></i>Upload Arsip</button>` : ''}
+      <div class="flex flex-wrap gap-2">
+        ${isWorkspace ? `<button id="btnManageWs" class="flex-1 sm:flex-none px-3 py-2 text-sm border rounded-lg hover:bg-slate-50"><i class="fa-solid fa-users-gear mr-1"></i>Kelola Anggota</button>` : ''}
+        ${!suspended ? `<button id="btnUpload" class="flex-1 sm:flex-none px-3 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700"><i class="fa-solid fa-upload mr-1"></i>Upload Arsip</button>` : ''}
       </div>
     </div>
     <div class="bg-white rounded-xl border">
-      <div class="p-4 border-b">
-        <input id="searchBox" placeholder="Cari arsip..." class="w-full md:w-80 border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 outline-none" />
+      <div class="p-4 border-b flex flex-col md:flex-row gap-3 md:items-center">
+        <input id="searchBox" placeholder="Cari arsip / tag..." class="w-full md:w-72 border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 outline-none" />
+        <select id="filterCategory" class="w-full md:w-44 border rounded-lg px-3 py-2 text-sm"><option value="">Semua Kategori</option></select>
+        <select id="filterYear" class="w-full md:w-32 border rounded-lg px-3 py-2 text-sm"><option value="">Semua Tahun</option></select>
+        <div id="bulkBar" class="hidden md:ml-auto flex items-center gap-2 text-sm">
+          <span id="bulkCount" class="text-slate-500"></span>
+          <button id="btnBulkDownload" class="px-2 py-1 border rounded-lg hover:bg-slate-50"><i class="fa-solid fa-download"></i> Unduh</button>
+          ${!suspended ? `<button id="btnBulkDelete" class="px-2 py-1 border border-red-300 text-red-600 rounded-lg hover:bg-red-50"><i class="fa-solid fa-trash"></i> Hapus</button>` : ''}
+        </div>
       </div>
-      <div class="overflow-x-auto">
+      <div id="archiveTableWrap" class="overflow-x-auto hidden sm:block">
         <table class="w-full text-sm">
           <thead class="bg-slate-50 text-slate-500 text-left">
             <tr>
+              <th class="px-4 py-3 w-10"><input type="checkbox" id="chkAll" /></th>
               <th class="px-4 py-3">Nama Dokumen</th>
               <th class="px-4 py-3">Kategori</th>
               <th class="px-4 py-3">Tahun</th>
@@ -313,16 +344,27 @@ async function renderArchivesView(){
           <tbody id="archiveRows"></tbody>
         </table>
       </div>
-      <div id="pagination" class="p-4 flex items-center justify-between text-sm"></div>
+      <div id="archiveCards" class="sm:hidden divide-y"></div>
+      <div id="pagination" class="p-4 flex flex-col sm:flex-row items-center justify-between gap-2 text-sm"></div>
     </div>
   `;
 
   if ($('#btnUpload')) $('#btnUpload').onclick = () => openUploadModal(isWorkspace ? state.view : null);
   if ($('#btnManageWs')) $('#btnManageWs').onclick = () => openManageWorkspaceModal(state.view);
   $('#searchBox').oninput = (e) => { state.search = e.target.value.toLowerCase(); state.page = 1; renderArchiveTable(); };
+  $('#filterCategory').onchange = (e) => { state.filterCategory = e.target.value; state.page = 1; renderArchiveTable(); };
+  $('#filterYear').onchange = (e) => { state.filterYear = e.target.value; state.page = 1; renderArchiveTable(); };
 
   await loadArchives(isWorkspace ? state.view : null);
+  populateFilterOptions();
   renderArchiveTable();
+}
+
+function populateFilterOptions(){
+  const cats = [...new Set(state.archives.map(a => a.category).filter(Boolean))].sort();
+  const years = [...new Set(state.archives.map(a => a.year).filter(Boolean))].sort().reverse();
+  $('#filterCategory').innerHTML = `<option value="">Semua Kategori</option>` + cats.map(c => `<option value="${c}">${c}</option>`).join('');
+  $('#filterYear').innerHTML = `<option value="">Semua Tahun</option>` + years.map(y => `<option value="${y}">${y}</option>`).join('');
 }
 
 async function loadArchives(workspaceId){
@@ -331,19 +373,22 @@ async function loadArchives(workspaceId){
   } catch (e) { state.archives = []; Swal.fire('Gagal Memuat', humanizeError(e.message), 'error'); }
 }
 
-function renderArchiveTable(){
-  const isWorkspace = isWorkspaceView();
-  const suspended = state.user.status === 'suspended';
-  let rows = state.archives.filter(a => !state.search || a.customName.toLowerCase().includes(state.search));
-  const total = rows.length;
-  const start = (state.page - 1) * state.pageSize;
-  rows = rows.slice(start, start + state.pageSize);
+function filteredArchives_(){
+  return state.archives.filter(a => {
+    const matchSearch = !state.search || a.customName.toLowerCase().includes(state.search) || (a.tags||'').toLowerCase().includes(state.search);
+    const matchCat = !state.filterCategory || a.category === state.filterCategory;
+    const matchYear = !state.filterYear || String(a.year) === String(state.filterYear);
+    return matchSearch && matchCat && matchYear;
+  });
+}
 
-  $('#archiveRows').innerHTML = rows.map(a => `
-    <tr class="border-t hover:bg-slate-50">
-      <td class="px-4 py-3 font-medium text-slate-700">${a.customName}<div class="text-xs text-slate-400">${a.fileName}</div></td>
-      <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full bg-slate-100 text-xs">${a.category}</span></td>
-      <td class="px-4 py-3">${a.year}</td>
+function archiveRowHtml_(a, isWorkspace, suspended){
+  return `
+    <tr class="border-t hover:bg-slate-50" data-row="${a.id}">
+      <td class="px-4 py-3"><input type="checkbox" class="rowChk" data-id="${a.id}" /></td>
+      <td class="px-4 py-3 font-medium text-slate-700">${a.customName}<div class="text-xs text-slate-400">${a.fileName}${a.tags ? ' · '+a.tags : ''}</div></td>
+      <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full bg-slate-100 text-xs">${a.category||'-'}</span></td>
+      <td class="px-4 py-3">${a.year||'-'}</td>
       ${isWorkspace ? `<td class="px-4 py-3 text-xs text-slate-500">${a.email}</td>` : ''}
       <td class="px-4 py-3">
         <div class="flex justify-end gap-2">
@@ -353,16 +398,59 @@ function renderArchiveTable(){
           <button data-delete="${a.id}" class="text-slate-400 hover:text-red-600" title="Hapus"><i class="fa-solid fa-trash"></i></button>` : ''}
         </div>
       </td>
-    </tr>`).join('') || `<tr><td colspan="5" class="text-center py-10 text-slate-400">Belum ada arsip</td></tr>`;
+    </tr>`;
+}
+
+function archiveCardHtml_(a, isWorkspace, suspended){
+  return `
+    <div class="p-4 flex gap-3" data-row="${a.id}">
+      <input type="checkbox" class="rowChk mt-1" data-id="${a.id}" />
+      <div class="flex-1 min-w-0">
+        <div class="font-medium text-slate-700 truncate">${a.customName}</div>
+        <div class="text-xs text-slate-400 truncate">${a.fileName}</div>
+        <div class="flex flex-wrap gap-1.5 mt-1.5">
+          <span class="px-2 py-0.5 rounded-full bg-slate-100 text-xs">${a.category||'-'}</span>
+          <span class="px-2 py-0.5 rounded-full bg-slate-100 text-xs">${a.year||'-'}</span>
+          ${isWorkspace ? `<span class="px-2 py-0.5 rounded-full bg-slate-100 text-xs">${a.email}</span>` : ''}
+        </div>
+        <div class="flex gap-3 mt-2 text-sm">
+          <button data-preview="${a.id}" class="text-slate-500"><i class="fa-solid fa-eye"></i></button>
+          <button data-download="${a.id}" class="text-green-600"><i class="fa-solid fa-download"></i></button>
+          ${!suspended ? `<button data-edit="${a.id}" class="text-amber-600"><i class="fa-solid fa-pen"></i></button>
+          <button data-delete="${a.id}" class="text-red-600"><i class="fa-solid fa-trash"></i></button>` : ''}
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderArchiveTable(){
+  const isWorkspace = isWorkspaceView();
+  const suspended = state.user.status === 'suspended';
+  let rows = filteredArchives_();
+  const total = rows.length;
+  const start = (state.page - 1) * state.pageSize;
+  rows = rows.slice(start, start + state.pageSize);
+
+  $('#archiveRows').innerHTML = rows.map(a => archiveRowHtml_(a, isWorkspace, suspended)).join('') || `<tr><td colspan="6" class="text-center py-10 text-slate-400">Belum ada arsip</td></tr>`;
+  $('#archiveCards').innerHTML = rows.map(a => archiveCardHtml_(a, isWorkspace, suspended)).join('') || `<div class="text-center py-10 text-slate-400 text-sm">Belum ada arsip</div>`;
 
   document.querySelectorAll('[data-preview]').forEach(b => b.onclick = () => previewArchive(b.dataset.preview));
   document.querySelectorAll('[data-download]').forEach(b => b.onclick = () => downloadArchive(b.dataset.download));
   document.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openEditModal(b.dataset.edit));
   document.querySelectorAll('[data-delete]').forEach(b => b.onclick = () => confirmDeleteArchive(b.dataset.delete));
+  document.querySelectorAll('.rowChk').forEach(c => c.onchange = () => {
+    if (c.checked) state.selectedIds.add(c.dataset.id); else state.selectedIds.delete(c.dataset.id);
+    updateBulkBar();
+  });
+  if ($('#chkAll')) $('#chkAll').onchange = (e) => {
+    document.querySelectorAll('.rowChk').forEach(c => { c.checked = e.target.checked; if (e.target.checked) state.selectedIds.add(c.dataset.id); else state.selectedIds.delete(c.dataset.id); });
+    updateBulkBar();
+  };
+  updateBulkBar();
 
   const totalPages = Math.max(1, Math.ceil(total / state.pageSize));
   $('#pagination').innerHTML = `
-    <span class="text-slate-400">Menampilkan ${rows.length} dari ${total} arsip</span>
+    <span class="text-slate-400 text-xs sm:text-sm">Menampilkan ${rows.length} dari ${total} arsip</span>
     <div class="flex gap-2">
       <button id="prevPage" class="px-3 py-1 border rounded-lg disabled:opacity-40" ${state.page<=1?'disabled':''}>Prev</button>
       <span class="px-2">${state.page} / ${totalPages}</span>
@@ -370,6 +458,26 @@ function renderArchiveTable(){
     </div>`;
   if ($('#prevPage')) $('#prevPage').onclick = () => { state.page--; renderArchiveTable(); };
   if ($('#nextPage')) $('#nextPage').onclick = () => { state.page++; renderArchiveTable(); };
+}
+
+function updateBulkBar(){
+  const bar = $('#bulkBar'); if (!bar) return;
+  const n = state.selectedIds.size;
+  if (n === 0) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden'); bar.classList.add('flex');
+  $('#bulkCount').textContent = `${n} dipilih`;
+  if ($('#btnBulkDownload')) $('#btnBulkDownload').onclick = async () => {
+    for (const id of state.selectedIds) { await downloadArchive(id); }
+  };
+  if ($('#btnBulkDelete')) $('#btnBulkDelete').onclick = async () => {
+    const r = await Swal.fire({ title: `Pindahkan ${n} arsip ke Sampah?`, icon: 'warning', showCancelButton: true, confirmButtonColor: '#dc2626' });
+    if (!r.isConfirmed) return;
+    for (const id of state.selectedIds) { try { await callApi('deleteArchive', { id, actorEmail: state.user.email }); } catch(e){} }
+    state.selectedIds.clear();
+    await loadArchives(currentWorkspaceIdOrNull());
+    populateFilterOptions();
+    renderArchiveTable();
+  };
 }
 
 function isSuspended(){ return state.user.status === 'suspended'; }
