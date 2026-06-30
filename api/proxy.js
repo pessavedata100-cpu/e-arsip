@@ -2,7 +2,7 @@
 // Proxy serverless Vercel ke Google Apps Script Web App.
 // Dipakai agar frontend tidak terkena CORS dan URL GAS tidak ter-expose ke client.
 
-const GAS_URL = process.env.GAS_WEB_APP_URL; // set di Vercel Project Settings > Environment Variables
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbxLtmNQ_VajLZmkCaA9mDVHUtIdq1wk5fNfLk1U9j7dCizSf8J4IwdrBMmJmy6AS-gFFA/exec';
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -15,7 +15,7 @@ export default async function handler(req, res) {
   }
 
   if (!GAS_URL) {
-    res.status(500).json({ ok: false, error: 'GAS_WEB_APP_URL belum diset di environment Vercel' });
+    res.status(500).json({ ok: false, error: 'GAS_URL belum diisi di api/proxy.js' });
     return;
   }
 
