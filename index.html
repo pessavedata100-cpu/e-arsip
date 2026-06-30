@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Yor.iAPP — Sistem E-Arsip Digital</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/js/all.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: { colors: { brand: { 50:'#eff6ff',100:'#dbeafe',500:'#2563eb',600:'#1d4ed8',700:'#1e40af',900:'#1e3a8a' } } } }
+  }
+</script>
+<style>
+  body{font-family:Inter,system-ui,sans-serif;}
+  .scrollbar-thin::-webkit-scrollbar{width:6px;height:6px}
+  .scrollbar-thin::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:4px}
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+<div id="app" class="min-h-screen"></div>
+
+<script>
+/* ============== KONFIGURASI ============== */
+const API_BASE = '/api/proxy'; // proxy Vercel -> GAS
+
+async function callApi(action, payload) {
+  const res = await fetch(API_BASE, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action, payload })
+  });
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.error || 'UNKNOWN_ERROR');
+  return json.data;
+}
+
+/* ============== STATE ============== */
+let state = {
+  user: JSON.parse(localStorage.getItem('yori_user') || 'null'),
+  view: 'personal',          // 'personal' | workspaceId | 'admin'
+  workspaces: [],
+  archives: [],
+  categories: [],
+  currentWorkspace: null,
+  page: 1,
+  pageSize: 10,
+  search: ''
+};
+
+function setUser(u){ state.user = u; localStorage.setItem('yori_user', JSON.stringify(u)); }
+function logout(){ localStorage.removeItem('yori_user'); state.user = null; render(); }
+
+const $ = sel => document.querySelector(sel);
+const appEl = () => document.getElementById('app');
+
+/* ============== RENDER ROOT ============== */
+function render(){
+  if (!state.user) return renderAuth();
+  return renderDashboard();
+}
+
+/* ============== AUTH VIEW ============== */
+function renderAuth(){
+  appEl().innerHTML = `
+  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-brand-700 to-brand-900 p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
+      <div class="text-center mb-6">
+        <div class="w-14 h-14 mx-auto bg-brand-600 rounded-xl flex items-center justify-center mb-3">
+          <i class="fa-solid fa-box-archive text-white text-2xl"></i>
+        </div>
+        <h1 class="text-2xl font-bold text-slate-800">Yor.iAPP</h1>
+        <p class="text-slate-500 text-sm">Sistem Arsip Digital Enterprise</p>
+      </div>
+      <div class="flex bg-slate-100 rounded-lg p-1 mb-6">
+        <button id="tabLogin" class="flex-1 py-2 rounded-md text-sm font-medium bg-white shadow">Masuk</button>
+        <button id="tabRegister" class="flex-1 py-2 rounded-md text-sm font-medium text-slate-500">Daftar</button>
+      </div>
+      <form id="formLogin" class="space-y-4">
+        <input required id="loginEmail" type="email" placeholder="Email" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 outline-none" />
+        <input required id="loginPassword" type="password" placeholder="Kata sandi" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 outline-none" />
+        <button class="w-full bg-brand-600 hover:bg-brand-700 text-white py-2.5 rounded-lg text-sm font-semibold transition">Masuk</button>
+      </form>
+      <form id="formRegister" class="space-y-4 hidden">
+        <input required id="regUsername" placeholder="Nama lengkap" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 outline-none" />
+        <input required id="regEmail" type="email" placeholder="Email" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 outline-none" />
+        <input required id="regPassword" type="password" placeholder="Kata sandi" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 outline-none" />
+        <button class="w-full bg-brand-600 hover:bg-brand-700 text-white py-2.5 rounded-lg text-sm font-semibold transition">Daftar</button>
+      </form>
+    </div>
+  </div>`;
+
+  $('#tabLogin').onclick = () => { $('#tabLogin').className='flex-1 py-2 rounded-md text-sm font-medium bg-white shadow'; $('#tabRegister').className='flex-1 py-2 rounded-md text-sm font-medium text-slate-500'; $('#formLogin').classList.remove('hidden'); $('#formRegister').classList.add('hidden'); };
+  $('#tabRegister').onclick = () => { $('#tabRegister').className='flex-1 py-2 rounded-md text-sm font-medium bg-white shadow'; $('#tabLogin').className='flex-1 py-2 rounded-md text-sm font-medium text-slate-500'; $('#formRegister').classList.remove('hidden'); $('#formLogin').classList.add('hidden'); };
+
+  $('#formLogin').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const u = await callApi('loginUser', { email: $('#loginEmail').value.trim(), password: $('#loginPassword').value });
+      setUser(u);
+      if (u.status === 'pending') {
+        Swal.fire('Akun Belum Aktif', 'Akun Anda menunggu aktivasi oleh Admin. Anda hanya bisa melihat dashboard kosong.', 'info');
+      }
+      render();
+      bootDashboardData();
+    } catch (err) { Swal.fire('Gagal Masuk', humanizeError(err.message), 'error'); }
+  };
+
+  $('#formRegister').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await callApi('registerUser', { username: $('#regUsername').value.trim(), email: $('#regEmail').value.trim(), password: $('#regPassword').value });
+      Swal.fire('Berhasil Daftar', 'Akun Anda menunggu aktivasi Admin sebelum bisa digunakan penuh.', 'success');
+      $('#tabLogin').click();
+    } catch (err) { Swal.fire('Gagal Daftar', humanizeError(err.message), 'error'); }
+  };
+}
+
+function humanizeError(code){
+  const map = {
+    USER_NOT_FOUND: 'Email tidak terdaftar.',
+    INVALID_PASSWORD: 'Kata sandi salah.',
+    ACCOUNT_ARCHIVED: 'Akun telah diarsipkan dan tidak dapat digunakan.',
+    EMAIL_ALREADY_REGISTERED: 'Email sudah terdaftar.',
+    ACCOUNT_SUSPENDED: 'Akun Anda di-suspend. Hanya unduh yang diizinkan.',
+    MAX_CATEGORY_REACHED: 'Maksimal 3 kategori.',
+    FORBIDDEN_NOT_WORKSPACE_MANAGER: 'Anda tidak memiliki hak admin di workspace ini.'
+  };
+  return map[code] || code;
+}
+
+/* ============== DASHBOARD SHELL ============== */
+function renderDashboard(){
+  const u = state.user;
+  const suspended = u.status === 'suspended';
+  appEl().innerHTML = `
+  <div class="flex h-screen overflow-hidden">
+    <aside class="w-72 bg-white border-r flex flex-col shrink-0">
+      <div class="p-5 border-b flex items-center gap-3">
+        <div class="w-10 h-10 bg-brand-600 rounded-lg flex items-center justify-center"><i class="fa-solid fa-box-archive text-white"></i></div>
+        <div><div class="font-bold text-slate-800 leading-tight">Yor.iAPP</div><div class="text-xs text-slate-400">Enterprise Archive</div></div>
+      </div>
+      <div class="p-4 border-b">
+        <div class="flex items-center gap-3">
+          <img src="${u.profilePic || 'https://api.dicebear.com/7.x/initials/svg?seed='+encodeURIComponent(u.username)}" class="w-10 h-10 rounded-full object-cover bg-slate-200" />
+          <div class="min-w-0">
+            <div class="text-sm font-semibold truncate">${u.username}</div>
+            <div class="text-xs text-slate-400 truncate">${u.email}</div>
+          </div>
+        </div>
+        <span class="inline-block mt-2 text-[10px] font-semibold px-2 py-0.5 rounded-full ${statusBadgeClass(u.status)}">${u.status.toUpperCase()}</span>
+      </div>
+      <nav id="sideNav" class="flex-1 overflow-y-auto scrollbar-thin p-3 space-y-1"></nav>
+      <div class="p-3 border-t">
+        <button id="btnLogout" class="w-full flex items-center gap-2 text-sm text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg"><i class="fa-solid fa-right-from-bracket"></i>Keluar</button>
+      </div>
+    </aside>
+    <main class="flex-1 overflow-y-auto scrollbar-thin">
+      ${suspended ? `<div class="bg-red-600 text-white text-sm px-6 py-3 flex items-center gap-2"><i class="fa-solid fa-triangle-exclamation"></i> AKUN ANDA DI-SUSPEND / BERHENTI BERLANGGANAN. Anda hanya diizinkan mengunduh arsip yang sudah ada. Upload, Edit, dan Hapus dinonaktifkan.</div>` : ''}
+      <div id="mainContent" class="p-6"></div>
+    </main>
+  </div>`;
+
+  $('#btnLogout').onclick = logout;
+  renderSideNav();
+  renderMainContent();
+}
+
+function statusBadgeClass(s){
+  return { active:'bg-green-100 text-green-700', pending:'bg-amber-100 text-amber-700', suspended:'bg-red-100 text-red-700', archived:'bg-slate-200 text-slate-600' }[s] || 'bg-slate-100 text-slate-600';
+}
+
+function renderSideNav(){
+  const u = state.user;
+  let html = `
+    <button data-view="personal" class="navitem w-full text-left text-sm px-3 py-2 rounded-lg flex items-center gap-2 ${state.view==='personal'?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}">
+      <i class="fa-solid fa-folder-open"></i> Arsip Pribadi
+    </button>
+    <div class="text-xs font-semibold text-slate-400 px-3 pt-3 pb-1 flex items-center justify-between">
+      <span>WORKSPACE</span>
+      <button id="btnNewWorkspace" class="text-brand-600 hover:text-brand-800"><i class="fa-solid fa-plus"></i></button>
+    </div>
+    <div id="wsList"></div>
+    <div class="text-xs font-semibold text-slate-400 px-3 pt-3 pb-1">KATEGORI</div>
+    <div id="catList" class="px-3 space-y-1 text-sm text-slate-600"></div>
+  `;
+  if (u.role === 'super_admin') {
+    html += `<button data-view="admin" class="navitem w-full text-left text-sm px-3 py-2 mt-3 rounded-lg flex items-center gap-2 ${state.view==='admin'?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}"><i class="fa-solid fa-user-shield"></i> Admin Panel</button>`;
+  }
+  $('#sideNav').innerHTML = html;
+  $('#btnNewWorkspace').onclick = openCreateWorkspaceModal;
+  document.querySelectorAll('.navitem').forEach(b => b.onclick = () => { state.view = b.dataset.view; renderDashboard(); });
+  renderWorkspaceListSidebar();
+  renderCategoryListSidebar();
+}
+
+async function bootDashboardData(){
+  try {
+    state.workspaces = await callApi('getUserWorkspaces', { email: state.user.email });
+    state.categories = await callApi('getCategories', { email: state.user.email });
+  } catch (e) {}
+}
+
+async function renderWorkspaceListSidebar(){
+  const el = $('#wsList'); if (!el) return;
+  if (!state.workspaces.length) { await bootDashboardData(); }
+  el.innerHTML = state.workspaces.map(w => `
+    <button data-ws="${w.workspaceId}" class="navitem w-full text-left text-sm px-3 py-2 rounded-lg flex items-center gap-2 ${state.view===w.workspaceId?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}">
+      <i class="fa-solid fa-folder"></i> <span class="truncate">${w.name}</span>
+      <span class="ml-auto text-[10px] text-slate-400">${w.myRole}</span>
+    </button>`).join('') || `<div class="px-3 text-xs text-slate-400">Belum ada workspace</div>`;
+  document.querySelectorAll('[data-ws]').forEach(b => b.onclick = () => {
+    state.view = b.dataset.ws;
+    state.currentWorkspace = state.workspaces.find(w => w.workspaceId === b.dataset.ws);
+    renderDashboard();
+  });
+}
+
+function renderCategoryListSidebar(){
+  const el = $('#catList'); if (!el) return;
+  const suspended = state.user.status === 'suspended';
+  el.innerHTML = state.categories.map(c => `<div class="flex items-center justify-between"><span>${c}</span>${!suspended?`<button data-delcat="${c}" class="text-slate-300 hover:text-red-500"><i class="fa-solid fa-xmark"></i></button>`:''}</div>`).join('')
+    + (!suspended && state.categories.length < 3 ? `<button id="btnAddCat" class="text-brand-600 text-xs mt-1"><i class="fa-solid fa-plus"></i> Tambah kategori</button>` : '');
+  document.querySelectorAll('[data-delcat]').forEach(b => b.onclick = async () => {
+    await callApi('deleteCategory', { email: state.user.email, name: b.dataset.delcat });
+    state.categories = await callApi('getCategories', { email: state.user.email });
+    renderCategoryListSidebar();
+  });
+  if ($('#btnAddCat')) $('#btnAddCat').onclick = async () => {
+    const { value } = await Swal.fire({ title: 'Kategori baru', input: 'text', showCancelButton: true });
+    if (value) {
+      try { await callApi('addCategory', { email: state.user.email, name: value });
+        state.categories = await callApi('getCategories', { email: state.user.email });
+        renderCategoryListSidebar();
+      } catch (e) { Swal.fire('Gagal', humanizeError(e.message), 'error'); }
+    }
+  };
+}
+
+/* ============== MAIN CONTENT ROUTER ============== */
+async function renderMainContent(){
+  if (state.view === 'admin') return renderAdminPanel();
+  return renderArchivesView();
+}
+
+/* ============== ARCHIVES VIEW ============== */
+async function renderArchivesView(){
+  const u = state.user;
+  const suspended = u.status === 'suspended';
+  const isWorkspace = state.view !== 'personal';
+  const title = isWorkspace ? (state.currentWorkspace ? state.currentWorkspace.name : 'Workspace') : 'Arsip Pribadi';
+
+  $('#mainContent').innerHTML = `
+    <div class="flex items-center justify-between mb-5">
+      <div>
+        <h2 class="text-xl font-bold text-slate-800">${title}</h2>
+        <p class="text-sm text-slate-400">${isWorkspace ? 'Arsip kolaboratif workspace' : 'Arsip pribadi Anda'}</p>
+      </div>
+      <div class="flex gap-2">
+        ${isWorkspace ? `<button id="btnManageWs" class="px-3 py-2 text-sm border rounded-lg hover:bg-slate-50"><i class="fa-solid fa-users-gear mr-1"></i>Kelola Anggota</button>` : ''}
+        ${!suspended ? `<button id="btnUpload" class="px-3 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700"><i class="fa-solid fa-upload mr-1"></i>Upload Arsip</button>` : ''}
+      </div>
+    </div>
+    <div class="bg-white rounded-xl border">
+      <div class="p-4 border-b">
+        <input id="searchBox" placeholder="Cari arsip..." class="w-full md:w-80 border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-brand-500 outline-none" />
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-50 text-slate-500 text-left">
+            <tr>
+              <th class="px-4 py-3">Nama Dokumen</th>
+              <th class="px-4 py-3">Kategori</th>
+              <th class="px-4 py-3">Tahun</th>
+              ${isWorkspace ? '<th class="px-4 py-3">Diunggah Oleh</th>' : ''}
+              <th class="px-4 py-3 text-right">Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="archiveRows"></tbody>
+        </table>
+      </div>
+      <div id="pagination" class="p-4 flex items-center justify-between text-sm"></div>
+    </div>
+  `;
+
+  if ($('#btnUpload')) $('#btnUpload').onclick = () => openUploadModal(isWorkspace ? state.view : null);
+  if ($('#btnManageWs')) $('#btnManageWs').onclick = () => openManageWorkspaceModal(state.view);
+  $('#searchBox').oninput = (e) => { state.search = e.target.value.toLowerCase(); state.page = 1; renderArchiveTable(); };
+
+  await loadArchives(isWorkspace ? state.view : null);
+  renderArchiveTable();
+}
+
+async function loadArchives(workspaceId){
+  try {
+    state.archives = await callApi('getArchives', { email: state.user.email, workspaceId: workspaceId || '' });
+  } catch (e) { state.archives = []; Swal.fire('Gagal Memuat', humanizeError(e.message), 'error'); }
+}
+
+function renderArchiveTable(){
+  const isWorkspace = state.view !== 'personal';
+  const suspended = state.user.status === 'suspended';
+  let rows = state.archives.filter(a => !state.search || a.customName.toLowerCase().includes(state.search));
+  const total = rows.length;
+  const start = (state.page - 1) * state.pageSize;
+  rows = rows.slice(start, start + state.pageSize);
+
+  $('#archiveRows').innerHTML = rows.map(a => `
+    <tr class="border-t hover:bg-slate-50">
+      <td class="px-4 py-3 font-medium text-slate-700">${a.customName}<div class="text-xs text-slate-400">${a.fileName}</div></td>
+      <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full bg-slate-100 text-xs">${a.category}</span></td>
+      <td class="px-4 py-3">${a.year}</td>
+      ${isWorkspace ? `<td class="px-4 py-3 text-xs text-slate-500">${a.email}</td>` : ''}
+      <td class="px-4 py-3">
+        <div class="flex justify-end gap-2">
+          <button data-preview="${a.id}" class="text-slate-400 hover:text-brand-600" title="Preview"><i class="fa-solid fa-eye"></i></button>
+          <button data-download="${a.id}" class="text-slate-400 hover:text-green-600" title="Unduh"><i class="fa-solid fa-download"></i></button>
+          ${!suspended ? `<button data-edit="${a.id}" class="text-slate-400 hover:text-amber-600" title="Edit"><i class="fa-solid fa-pen"></i></button>
+          <button data-delete="${a.id}" class="text-slate-400 hover:text-red-600" title="Hapus"><i class="fa-solid fa-trash"></i></button>` : ''}
+        </div>
+      </td>
+    </tr>`).join('') || `<tr><td colspan="5" class="text-center py-10 text-slate-400">Belum ada arsip</td></tr>`;
+
+  document.querySelectorAll('[data-preview]').forEach(b => b.onclick = () => previewArchive(b.dataset.preview));
+  document.querySelectorAll('[data-download]').forEach(b => b.onclick = () => downloadArchive(b.dataset.download));
+  document.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openEditModal(b.dataset.edit));
+  document.querySelectorAll('[data-delete]').forEach(b => b.onclick = () => confirmDeleteArchive(b.dataset.delete));
+
+  const totalPages = Math.max(1, Math.ceil(total / state.pageSize));
+  $('#pagination').innerHTML = `
+    <span class="text-slate-400">Menampilkan ${rows.length} dari ${total} arsip</span>
+    <div class="flex gap-2">
+      <button id="prevPage" class="px-3 py-1 border rounded-lg disabled:opacity-40" ${state.page<=1?'disabled':''}>Prev</button>
+      <span class="px-2">${state.page} / ${totalPages}</span>
+      <button id="nextPage" class="px-3 py-1 border rounded-lg disabled:opacity-40" ${state.page>=totalPages?'disabled':''}>Next</button>
+    </div>`;
+  if ($('#prevPage')) $('#prevPage').onclick = () => { state.page--; renderArchiveTable(); };
+  if ($('#nextPage')) $('#nextPage').onclick = () => { state.page++; renderArchiveTable(); };
+}
+
+function isSuspended(){ return state.user.status === 'suspended'; }
+
+async function previewArchive(id){
+  const a = state.archives.find(x => x.id === id);
+  Swal.fire({ title: a.customName, html: `<iframe src="${a.previewUrl}" class="w-full h-96 border rounded-lg"></iframe>`, width: 700 });
+}
+
+async function downloadArchive(id){
+  try {
+    const { downloadUrl } = await callApi('getDownloadLink', { id, email: state.user.email });
+    window.open(downloadUrl, '_blank');
+  } catch (e) { Swal.fire('Gagal Unduh', humanizeError(e.message), 'error'); }
+}
+
+async function confirmDeleteArchive(id){
+  if (isSuspended()) return Swal.fire('Akses Dibatasi', 'Akun Anda dibanned/berhenti berlangganan. Hanya unduh yang diizinkan.', 'warning');
+  const result = await Swal.fire({ title: 'Hapus arsip ini?', icon: 'warning', showCancelButton: true, confirmButtonColor: '#dc2626' });
+  if (!result.isConfirmed) return;
+  try {
+    await callApi('deleteArchive', { id, actorEmail: state.user.email });
+    await loadArchives(state.view !== 'personal' ? state.view : null);
+    renderArchiveTable();
+  } catch (e) { Swal.fire('Gagal', humanizeError(e.message), 'error'); }
+}
+
+/* ============== UPLOAD / EDIT MODAL ============== */
+function openUploadModal(workspaceId){
+  if (isSuspended()) return Swal.fire('Akses Dibatasi', 'Akun Anda dibanned/berhenti berlangganan. Hanya unduh yang diizinkan.', 'warning');
+  const wsOptions = state.workspaces.filter(w => w.myRole === 'owner' || w.myRole === 'admin')
+    .map(w => `<option value="${w.workspaceId}" ${workspaceId===w.workspaceId?'selected':''}>${w.name}</option>`).join('');
+  const catOptions = state.categories.map(c => `<option value="${c}">${c}</option>`).join('');
+
+  Swal.fire({
+    title: 'Upload Arsip',
+    html: `
+      <input type="file" id="fUpFile" class="w-full border rounded-lg px-3 py-2 text-sm mb-2" />
+      <input type="text" id="fUpName" placeholder="Judul dokumen" class="w-full border rounded-lg px-3 py-2 text-sm mb-2" />
+      <select id="fUpCategory" class="w-full border rounded-lg px-3 py-2 text-sm mb-2"><option value="">Pilih kategori</option>${catOptions}</select>
+      <input type="number" id="fUpYear" placeholder="Tahun" class="w-full border rounded-lg px-3 py-2 text-sm mb-2" />
+      <select id="fUpWorkspace" class="w-full border rounded-lg px-3 py-2 text-sm"><option value="">Arsip Pribadi (tanpa workspace)</option>${wsOptions}</select>
+    `,
+    confirmButtonText: 'Upload', showCancelButton: true,
+    preConfirm: async () => {
+      const file = document.getElementById('fUpFile').files[0];
+      if (!file) { Swal.showValidationMessage('Pilih file terlebih dahulu'); return false; }
+      const base64 = await fileToBase64(file);
+      return {
+        fileBase64: base64, fileName: file.name, mimeType: file.type,
+        customName: document.getElementById('fUpName').value || file.name,
+        category: document.getElementById('fUpCategory').value,
+        year: document.getElementById('fUpYear').value,
+        workspaceId: document.getElementById('fUpWorkspace').value
+      };
+    }
+  }).then(async (res) => {
+    if (!res.isConfirmed) return;
+    try {
+      await callApi('uploadArchive', { email: state.user.email, ...res.value });
+      Swal.fire('Berhasil', 'Arsip berhasil diupload.', 'success');
+      await loadArchives(state.view !== 'personal' ? state.view : null);
+      renderArchiveTable();
+    } catch (e) { Swal.fire('Gagal Upload', humanizeError(e.message), 'error'); }
+  });
+}
+
+function fileToBase64(file){
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+function openEditModal(id){
+  if (isSuspended()) return Swal.fire('Akses Dibatasi', 'Akun Anda dibanned/berhenti berlangganan. Hanya unduh yang diizinkan.', 'warning');
+  const a = state.archives.find(x => x.id === id);
+  const catOptions = state.categories.map(c => `<option value="${c}" ${c===a.category?'selected':''}>${c}</option>`).join('');
+  Swal.fire({
+    title: 'Edit Arsip',
+    html: `
+      <input type="text" id="eName" value="${a.customName}" class="w-full border rounded-lg px-3 py-2 text-sm mb-2" />
+      <select id="eCategory" class="w-full border rounded-lg px-3 py-2 text-sm mb-2">${catOptions}</select>
+      <input type="number" id="eYear" value="${a.year}" class="w-full border rounded-lg px-3 py-2 text-sm" />
+    `,
+    confirmButtonText: 'Simpan', showCancelButton: true
+  }).then(async (res) => {
+    if (!res.isConfirmed) return;
+    try {
+      await callApi('updateArchive', {
+        id, actorEmail: state.user.email,
+        customName: document.getElementById('eName').value,
+        category: document.getElementById('eCategory').value,
+        year: document.getElementById('eYear').value
+      });
+      await loadArchives(state.view !== 'personal' ? state.view : null);
+      renderArchiveTable();
+    } catch (e) { Swal.fire('Gagal', humanizeError(e.message), 'error'); }
+  });
+}
+
+/* ============== WORKSPACE MODALS ============== */
+function openCreateWorkspaceModal(){
+  if (isSuspended()) return Swal.fire('Akses Dibatasi', 'Akun Anda dibanned/berhenti berlangganan.', 'warning');
+  Swal.fire({
+    title: 'Buat Workspace Baru',
+    html: `<input id="wsName" placeholder="Nama workspace" class="w-full border rounded-lg px-3 py-2 text-sm mb-2" />
+           <textarea id="wsDesc" placeholder="Deskripsi" class="w-full border rounded-lg px-3 py-2 text-sm"></textarea>`,
+    confirmButtonText: 'Buat', showCancelButton: true
+  }).then(async (res) => {
+    if (!res.isConfirmed) return;
+    const name = document.getElementById('wsName').value.trim();
+    if (!name) return;
+    try {
+      await callApi('createWorkspace', { email: state.user.email, name, description: document.getElementById('wsDesc').value });
+      state.workspaces = await callApi('getUserWorkspaces', { email: state.user.email });
+      renderWorkspaceListSidebar();
+      Swal.fire('Berhasil', 'Workspace dibuat.', 'success');
+    } catch (e) { Swal.fire('Gagal', humanizeError(e.message), 'error'); }
+  });
+}
+
+async function openManageWorkspaceModal(workspaceId){
+  const members = await callApi('getWorkspaceMembers', { workspaceId, email: state.user.email });
+  const listHtml = members.map(m => `
+    <div class="flex items-center justify-between border-b py-2 text-sm">
+      <div><div class="font-medium">${m.email}</div><div class="text-xs text-slate-400">${m.role}</div></div>
+      ${m.role !== 'owner' ? `<div class="flex gap-2">
+        <select data-role-select="${m.email}" class="text-xs border rounded px-1 py-0.5">
+          <option value="member" ${m.role==='member'?'selected':''}>member</option>
+          <option value="admin" ${m.role==='admin'?'selected':''}>admin</option>
+        </select>
+        <button data-remove="${m.email}" class="text-red-500 text-xs"><i class="fa-solid fa-user-minus"></i></button>
+      </div>` : ''}
+    </div>`).join('');
+
+  Swal.fire({
+    title: 'Kelola Anggota Workspace',
+    html: `
+      <div class="text-left max-h-60 overflow-y-auto mb-3">${listHtml}</div>
+      <div class="flex gap-2">
+        <input id="inviteEmail" placeholder="Email anggota baru" class="flex-1 border rounded-lg px-2 py-1 text-sm" />
+        <select id="inviteRole" class="border rounded-lg px-2 py-1 text-sm"><option value="member">member</option><option value="admin">admin</option></select>
+        <button id="btnInvite" class="bg-brand-600 text-white px-3 py-1 rounded-lg text-sm">Undang</button>
+      </div>
+    `,
+    showConfirmButton: false, showCloseButton: true, width: 500,
+    didOpen: () => {
+      document.getElementById('btnInvite').onclick = async () => {
+        const targetEmail = document.getElementById('inviteEmail').value.trim();
+        const role = document.getElementById('inviteRole').value;
+        try {
+          await callApi('inviteToWorkspace', { workspaceId, inviterEmail: state.user.email, targetEmail, role });
+          Swal.close(); openManageWorkspaceModal(workspaceId);
+        } catch (e) { Swal.fire('Gagal', humanizeError(e.message), 'error'); }
+      };
+      document.querySelectorAll('[data-remove]').forEach(b => b.onclick = async () => {
+        await callApi('removeFromWorkspace', { workspaceId, actorEmail: state.user.email, targetEmail: b.dataset.remove });
+        Swal.close(); openManageWorkspaceModal(workspaceId);
+      });
+      document.querySelectorAll('[data-role-select]').forEach(sel => sel.onchange = async () => {
+        await callApi('updateMemberRole', { workspaceId, actorEmail: state.user.email, targetEmail: sel.dataset.roleSelect, newRole: sel.value });
+      });
+    }
+  });
+}
+
+/* ============== ADMIN PANEL ============== */
+async function renderAdminPanel(){
+  const users = await callApi('getAllUsers', { actorEmail: state.user.email });
+  const workspaces = await callApi('getAllWorkspaces', { actorEmail: state.user.email });
+  const logs = await callApi('getActivityLog', { actorEmail: state.user.email });
+
+  $('#mainContent').innerHTML = `
+    <h2 class="text-xl font-bold mb-5">Admin Panel</h2>
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Total Users</div><div class="text-2xl font-bold">${users.length}</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Total Workspace</div><div class="text-2xl font-bold">${workspaces.length}</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Aktivitas Tercatat</div><div class="text-2xl font-bold">${logs.length}</div></div>
+    </div>
+
+    <div class="bg-white border rounded-xl mb-6">
+      <div class="p-4 border-b font-semibold text-sm">Manajemen User</div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-50 text-left text-slate-500"><tr><th class="px-4 py-2">Email</th><th class="px-4 py-2">Nama</th><th class="px-4 py-2">Status</th><th class="px-4 py-2">Role</th><th class="px-4 py-2 text-right">Aksi</th></tr></thead>
+          <tbody>
+            ${users.map(u => `
+              <tr class="border-t">
+                <td class="px-4 py-2">${u.email}</td>
+                <td class="px-4 py-2">${u.username}</td>
+                <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs ${statusBadgeClass(u.status)}">${u.status}</span></td>
+                <td class="px-4 py-2">${u.role}</td>
+                <td class="px-4 py-2 text-right space-x-2">
+                  <select data-status="${u.email}" class="text-xs border rounded px-1 py-0.5">
+                    ${['pending','active','suspended','archived'].map(s=>`<option value="${s}" ${s===u.status?'selected':''}>${s}</option>`).join('')}
+                  </select>
+                  <button data-deluser="${u.email}" class="text-red-500 text-xs"><i class="fa-solid fa-trash"></i></button>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="bg-white border rounded-xl mb-6">
+      <div class="p-4 border-b font-semibold text-sm">Semua Workspace</div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-50 text-left text-slate-500"><tr><th class="px-4 py-2">Nama</th><th class="px-4 py-2">Owner</th><th class="px-4 py-2">Status</th></tr></thead>
+          <tbody>${workspaces.map(w => `<tr class="border-t"><td class="px-4 py-2">${w.name}</td><td class="px-4 py-2">${w.ownerEmail}</td><td class="px-4 py-2">${w.isActive ? 'Aktif' : 'Dibekukan'}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="bg-white border rounded-xl">
+      <div class="p-4 border-b font-semibold text-sm">Log Aktivitas Terbaru</div>
+      <div class="max-h-72 overflow-y-auto scrollbar-thin">
+        <table class="w-full text-sm">
+          <tbody>${logs.map(l => `<tr class="border-t"><td class="px-4 py-2 text-xs text-slate-400">${l.timestamp}</td><td class="px-4 py-2">${l.email}</td><td class="px-4 py-2 font-medium">${l.action}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  document.querySelectorAll('[data-status]').forEach(sel => sel.onchange = async () => {
+    try {
+      await callApi('updateUserStatus', { actorEmail: state.user.email, email: sel.dataset.status, newStatus: sel.value });
+      Swal.fire({ icon: 'success', title: 'Status diperbarui', timer: 1000, showConfirmButton: false });
+    } catch (e) { Swal.fire('Gagal', humanizeError(e.message), 'error'); }
+  });
+  document.querySelectorAll('[data-deluser]').forEach(b => b.onclick = async () => {
+    const r = await Swal.fire({ title: `Hapus user ${b.dataset.deluser}?`, icon: 'warning', showCancelButton: true, confirmButtonColor: '#dc2626' });
+    if (!r.isConfirmed) return;
+    await callApi('deleteUser', { actorEmail: state.user.email, email: b.dataset.deluser });
+    renderAdminPanel();
+  });
+}
+
+/* ============== INIT ============== */
+render();
+if (state.user) bootDashboardData().then(renderDashboard);
+</script>
+</body>
+</html>
