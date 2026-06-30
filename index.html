@@ -37,10 +37,31 @@ async function callApi(action, payload) {
   return json.data;
 }
 
+// Versi XHR khusus upload agar progress bar bisa dipantau (fetch tidak punya upload progress event)
+function callApiWithProgress(action, payload, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', API_BASE, true);
+    xhr.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      try {
+        const json = JSON.parse(xhr.responseText);
+        if (!json.ok) return reject(new Error(json.error || 'UNKNOWN_ERROR'));
+        resolve(json.data);
+      } catch (e) { reject(new Error('PARSE_ERROR')); }
+    };
+    xhr.onerror = () => reject(new Error('NETWORK_ERROR'));
+    xhr.send(JSON.stringify({ action, payload }));
+  });
+}
+
 /* ============== STATE ============== */
 let state = {
   user: JSON.parse(localStorage.getItem('yori_user') || 'null'),
-  view: 'personal',          // 'personal' | workspaceId | 'admin'
+  view: 'dashboard',          // 'dashboard' | 'personal' | workspaceId | 'admin' | 'trash' | 'reports' | 'settings'
   workspaces: [],
   archives: [],
   categories: [],
@@ -175,6 +196,9 @@ function statusBadgeClass(s){
 function renderSideNav(){
   const u = state.user;
   let html = `
+    <button data-view="dashboard" class="navitem w-full text-left text-sm px-3 py-2 rounded-lg flex items-center gap-2 ${state.view==='dashboard'?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}">
+      <i class="fa-solid fa-chart-line"></i> Dashboard
+    </button>
     <button data-view="personal" class="navitem w-full text-left text-sm px-3 py-2 rounded-lg flex items-center gap-2 ${state.view==='personal'?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}">
       <i class="fa-solid fa-folder-open"></i> Arsip Pribadi
     </button>
@@ -185,9 +209,13 @@ function renderSideNav(){
     <div id="wsList"></div>
     <div class="text-xs font-semibold text-slate-400 px-3 pt-3 pb-1">KATEGORI</div>
     <div id="catList" class="px-3 space-y-1 text-sm text-slate-600"></div>
+    <div class="text-xs font-semibold text-slate-400 px-3 pt-3 pb-1">LAINNYA</div>
+    <button data-view="trash" class="navitem w-full text-left text-sm px-3 py-2 rounded-lg flex items-center gap-2 ${state.view==='trash'?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}"><i class="fa-solid fa-trash-can"></i> Sampah</button>
+    <button data-view="reports" class="navitem w-full text-left text-sm px-3 py-2 rounded-lg flex items-center gap-2 ${state.view==='reports'?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}"><i class="fa-solid fa-file-export"></i> Laporan / Export</button>
+    <button data-view="settings" class="navitem w-full text-left text-sm px-3 py-2 rounded-lg flex items-center gap-2 ${state.view==='settings'?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}"><i class="fa-solid fa-gear"></i> Pengaturan</button>
   `;
   if (u.role === 'super_admin') {
-    html += `<button data-view="admin" class="navitem w-full text-left text-sm px-3 py-2 mt-3 rounded-lg flex items-center gap-2 ${state.view==='admin'?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}"><i class="fa-solid fa-user-shield"></i> Admin Panel</button>`;
+    html += `<button data-view="admin" class="navitem w-full text-left text-sm px-3 py-2 mt-1 rounded-lg flex items-center gap-2 ${state.view==='admin'?'bg-brand-50 text-brand-700 font-semibold':'hover:bg-slate-50'}"><i class="fa-solid fa-user-shield"></i> Admin Panel</button>`;
   }
   $('#sideNav').innerHTML = html;
   $('#btnNewWorkspace').onclick = openCreateWorkspaceModal;
@@ -242,6 +270,10 @@ function renderCategoryListSidebar(){
 /* ============== MAIN CONTENT ROUTER ============== */
 async function renderMainContent(){
   if (state.view === 'admin') return renderAdminPanel();
+  if (state.view === 'dashboard') return renderDashboardStats();
+  if (state.view === 'trash') return renderTrashView();
+  if (state.view === 'reports') return renderReportsView();
+  if (state.view === 'settings') return renderSettingsView();
   return renderArchivesView();
 }
 
@@ -249,7 +281,7 @@ async function renderMainContent(){
 async function renderArchivesView(){
   const u = state.user;
   const suspended = u.status === 'suspended';
-  const isWorkspace = state.view !== 'personal';
+  const isWorkspace = isWorkspaceView();
   const title = isWorkspace ? (state.currentWorkspace ? state.currentWorkspace.name : 'Workspace') : 'Arsip Pribadi';
 
   $('#mainContent').innerHTML = `
@@ -300,7 +332,7 @@ async function loadArchives(workspaceId){
 }
 
 function renderArchiveTable(){
-  const isWorkspace = state.view !== 'personal';
+  const isWorkspace = isWorkspaceView();
   const suspended = state.user.status === 'suspended';
   let rows = state.archives.filter(a => !state.search || a.customName.toLowerCase().includes(state.search));
   const total = rows.length;
@@ -342,25 +374,60 @@ function renderArchiveTable(){
 
 function isSuspended(){ return state.user.status === 'suspended'; }
 
+const NON_WORKSPACE_VIEWS = ['dashboard','personal','trash','reports','settings','admin'];
+function isWorkspaceView(){ return !NON_WORKSPACE_VIEWS.includes(state.view); }
+function currentWorkspaceIdOrNull(){ return isWorkspaceView() ? state.view : null; }
+
+function base64ToBlob_(base64, mimeType){
+  const byteChars = atob(base64);
+  const byteNumbers = new Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+  return new Blob([new Uint8Array(byteNumbers)], { type: mimeType });
+}
+
 async function previewArchive(id){
   const a = state.archives.find(x => x.id === id);
-  Swal.fire({ title: a.customName, html: `<iframe src="${a.previewUrl}" class="w-full h-96 border rounded-lg"></iframe>`, width: 700 });
+  Swal.fire({ title: a.customName, html: `<div id="previewBox" class="w-full h-96 flex items-center justify-center text-slate-400"><i class="fa-solid fa-spinner fa-spin text-2xl"></i></div>`, width: 760, showConfirmButton: false, showCloseButton: true });
+  try {
+    const { base64, mimeType } = await callApi('getFileContent', { id, email: state.user.email, mode: 'preview' });
+    const blob = base64ToBlob_(base64, mimeType);
+    const blobUrl = URL.createObjectURL(blob);
+    const box = document.getElementById('previewBox');
+    if (box) {
+      if (mimeType.startsWith('image/')) {
+        box.innerHTML = `<img src="${blobUrl}" class="max-h-96 mx-auto rounded-lg" />`;
+      } else {
+        box.outerHTML = `<object data="${blobUrl}" type="${mimeType}" class="w-full h-96 border rounded-lg">Pratinjau tidak didukung untuk tipe file ini. Gunakan tombol unduh.</object>`;
+      }
+    }
+  } catch (e) {
+    const box = document.getElementById('previewBox');
+    if (box) box.innerHTML = `<span class="text-red-500 text-sm">${humanizeError(e.message)}</span>`;
+  }
 }
 
 async function downloadArchive(id){
+  const a = state.archives.find(x => x.id === id);
   try {
-    const { downloadUrl } = await callApi('getDownloadLink', { id, email: state.user.email });
-    window.open(downloadUrl, '_blank');
+    Swal.fire({ title: 'Menyiapkan unduhan...', didOpen: () => Swal.showLoading(), showConfirmButton: false });
+    const { base64, mimeType, fileName } = await callApi('getFileContent', { id, email: state.user.email, mode: 'download' });
+    const blob = base64ToBlob_(base64, mimeType);
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl; link.download = fileName || (a ? a.fileName : 'file');
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+    Swal.close();
   } catch (e) { Swal.fire('Gagal Unduh', humanizeError(e.message), 'error'); }
 }
 
 async function confirmDeleteArchive(id){
   if (isSuspended()) return Swal.fire('Akses Dibatasi', 'Akun Anda dibanned/berhenti berlangganan. Hanya unduh yang diizinkan.', 'warning');
-  const result = await Swal.fire({ title: 'Hapus arsip ini?', icon: 'warning', showCancelButton: true, confirmButtonColor: '#dc2626' });
+  const result = await Swal.fire({ title: 'Pindahkan arsip ini ke Sampah?', text: 'Arsip masih bisa dipulihkan dari menu Sampah.', icon: 'warning', showCancelButton: true, confirmButtonColor: '#dc2626', confirmButtonText: 'Ya, pindahkan' });
   if (!result.isConfirmed) return;
   try {
     await callApi('deleteArchive', { id, actorEmail: state.user.email });
-    await loadArchives(state.view !== 'personal' ? state.view : null);
+    await loadArchives(currentWorkspaceIdOrNull());
     renderArchiveTable();
   } catch (e) { Swal.fire('Gagal', humanizeError(e.message), 'error'); }
 }
@@ -379,29 +446,53 @@ function openUploadModal(workspaceId){
       <input type="text" id="fUpName" placeholder="Judul dokumen" class="w-full border rounded-lg px-3 py-2 text-sm mb-2" />
       <select id="fUpCategory" class="w-full border rounded-lg px-3 py-2 text-sm mb-2"><option value="">Pilih kategori</option>${catOptions}</select>
       <input type="number" id="fUpYear" placeholder="Tahun" class="w-full border rounded-lg px-3 py-2 text-sm mb-2" />
-      <select id="fUpWorkspace" class="w-full border rounded-lg px-3 py-2 text-sm"><option value="">Arsip Pribadi (tanpa workspace)</option>${wsOptions}</select>
+      <input type="text" id="fUpTags" placeholder="Tag (pisahkan dengan koma)" class="w-full border rounded-lg px-3 py-2 text-sm mb-2" />
+      <select id="fUpWorkspace" class="w-full border rounded-lg px-3 py-2 text-sm mb-3"><option value="">Arsip Pribadi (tanpa workspace)</option>${wsOptions}</select>
+      <div id="upProgressWrap" class="hidden">
+        <div class="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
+          <div id="upProgressBar" class="bg-brand-600 h-2.5 rounded-full transition-all" style="width:0%"></div>
+        </div>
+        <div id="upProgressText" class="text-xs text-slate-500 mt-1 text-right">0%</div>
+      </div>
     `,
     confirmButtonText: 'Upload', showCancelButton: true,
+    showLoaderOnConfirm: false,
     preConfirm: async () => {
       const file = document.getElementById('fUpFile').files[0];
       if (!file) { Swal.showValidationMessage('Pilih file terlebih dahulu'); return false; }
+
+      document.getElementById('upProgressWrap').classList.remove('hidden');
+      Swal.getConfirmButton().disabled = true;
+      Swal.getCancelButton().disabled = true;
+
       const base64 = await fileToBase64(file);
-      return {
-        fileBase64: base64, fileName: file.name, mimeType: file.type,
+      const payload = {
+        email: state.user.email, fileBase64: base64, fileName: file.name, mimeType: file.type,
         customName: document.getElementById('fUpName').value || file.name,
         category: document.getElementById('fUpCategory').value,
         year: document.getElementById('fUpYear').value,
+        tags: document.getElementById('fUpTags').value,
         workspaceId: document.getElementById('fUpWorkspace').value
       };
+
+      try {
+        await callApiWithProgress('uploadArchive', payload, (pct) => {
+          document.getElementById('upProgressBar').style.width = pct + '%';
+          document.getElementById('upProgressText').textContent = pct + '%';
+        });
+        return true;
+      } catch (e) {
+        Swal.showValidationMessage(humanizeError(e.message));
+        Swal.getConfirmButton().disabled = false;
+        Swal.getCancelButton().disabled = false;
+        return false;
+      }
     }
   }).then(async (res) => {
     if (!res.isConfirmed) return;
-    try {
-      await callApi('uploadArchive', { email: state.user.email, ...res.value });
-      Swal.fire('Berhasil', 'Arsip berhasil diupload.', 'success');
-      await loadArchives(state.view !== 'personal' ? state.view : null);
-      renderArchiveTable();
-    } catch (e) { Swal.fire('Gagal Upload', humanizeError(e.message), 'error'); }
+    Swal.fire('Berhasil', 'Arsip berhasil diupload.', 'success');
+    await loadArchives(currentWorkspaceIdOrNull());
+    renderArchiveTable();
   });
 }
 
@@ -435,7 +526,7 @@ function openEditModal(id){
         category: document.getElementById('eCategory').value,
         year: document.getElementById('eYear').value
       });
-      await loadArchives(state.view !== 'personal' ? state.view : null);
+      await loadArchives(currentWorkspaceIdOrNull());
       renderArchiveTable();
     } catch (e) { Swal.fire('Gagal', humanizeError(e.message), 'error'); }
   });
@@ -505,6 +596,173 @@ async function openManageWorkspaceModal(workspaceId){
       });
     }
   });
+}
+
+/* ============== DASHBOARD STATS ============== */
+async function renderDashboardStats(){
+  $('#mainContent').innerHTML = `<div class="flex items-center justify-center py-20 text-slate-400"><i class="fa-solid fa-spinner fa-spin text-2xl"></i></div>`;
+  let stats;
+  try { stats = await callApi('getDashboardStats', { email: state.user.email }); }
+  catch (e) { $('#mainContent').innerHTML = `<div class="text-red-500 text-sm">${humanizeError(e.message)}</div>`; return; }
+
+  const catRows = Object.entries(stats.byCategory || {}).map(([k,v]) => `<div class="flex items-center justify-between text-sm py-1"><span>${k||'(tanpa kategori)'}</span><span class="font-semibold">${v}</span></div>`).join('') || '<div class="text-slate-400 text-sm">Belum ada data</div>';
+  const yearRows = Object.entries(stats.byYear || {}).sort().reverse().map(([k,v]) => `<div class="flex items-center justify-between text-sm py-1"><span>${k}</span><span class="font-semibold">${v}</span></div>`).join('') || '<div class="text-slate-400 text-sm">Belum ada data</div>';
+
+  $('#mainContent').innerHTML = `
+    <h2 class="text-xl font-bold mb-5">Dashboard</h2>
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Total Arsip</div><div class="text-2xl font-bold text-brand-700">${stats.totalArchives}</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Ukuran Total</div><div class="text-2xl font-bold text-brand-700">${formatBytes(stats.totalSizeBytes)}</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Workspace Diikuti</div><div class="text-2xl font-bold text-brand-700">${stats.totalWorkspaces}</div></div>
+      <div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Di Sampah</div><div class="text-2xl font-bold text-amber-600">${stats.trashedCount}</div></div>
+      ${stats.totalUsers !== undefined ? `<div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Total User (Sistem)</div><div class="text-2xl font-bold text-slate-700">${stats.totalUsers}</div></div>` : ''}
+      ${stats.totalAllArchives !== undefined ? `<div class="bg-white border rounded-xl p-4"><div class="text-xs text-slate-400">Total Arsip (Sistem)</div><div class="text-2xl font-bold text-slate-700">${stats.totalAllArchives}</div></div>` : ''}
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="bg-white border rounded-xl p-4">
+        <div class="font-semibold text-sm mb-2">Arsip per Kategori</div>${catRows}
+      </div>
+      <div class="bg-white border rounded-xl p-4">
+        <div class="font-semibold text-sm mb-2">Arsip per Tahun</div>${yearRows}
+      </div>
+    </div>
+  `;
+}
+
+function formatBytes(n){
+  if (!n) return '0 B';
+  const units = ['B','KB','MB','GB'];
+  let i = 0; let v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return v.toFixed(1) + ' ' + units[i];
+}
+
+/* ============== TRASH VIEW ============== */
+async function renderTrashView(){
+  $('#mainContent').innerHTML = `<div class="flex items-center justify-center py-20 text-slate-400"><i class="fa-solid fa-spinner fa-spin text-2xl"></i></div>`;
+  let items;
+  try { items = await callApi('getTrash', { email: state.user.email }); }
+  catch (e) { $('#mainContent').innerHTML = `<div class="text-red-500 text-sm">${humanizeError(e.message)}</div>`; return; }
+
+  $('#mainContent').innerHTML = `
+    <div class="flex items-center justify-between mb-5">
+      <div><h2 class="text-xl font-bold">Sampah</h2><p class="text-sm text-slate-400">Arsip yang dihapus tersimpan di sini sebelum dihapus permanen</p></div>
+      ${items.length ? `<button id="btnEmptyTrash" class="px-3 py-2 text-sm border border-red-300 text-red-600 rounded-lg hover:bg-red-50"><i class="fa-solid fa-trash-can mr-1"></i>Kosongkan Sampah</button>` : ''}
+    </div>
+    <div class="bg-white rounded-xl border overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-left text-slate-500"><tr><th class="px-4 py-3">Nama Dokumen</th><th class="px-4 py-3">Dihapus Oleh</th><th class="px-4 py-3">Tanggal</th><th class="px-4 py-3 text-right">Aksi</th></tr></thead>
+        <tbody>
+          ${items.map(it => `
+            <tr class="border-t">
+              <td class="px-4 py-3 font-medium">${it.customName}<div class="text-xs text-slate-400">${it.fileName}</div></td>
+              <td class="px-4 py-3 text-xs text-slate-500">${it.trashedBy}</td>
+              <td class="px-4 py-3 text-xs text-slate-500">${it.trashedAt ? new Date(it.trashedAt).toLocaleString('id-ID') : '-'}</td>
+              <td class="px-4 py-3 text-right space-x-2">
+                <button data-restore="${it.id}" class="text-green-600 hover:underline text-xs"><i class="fa-solid fa-rotate-left"></i> Pulihkan</button>
+                <button data-perm="${it.id}" class="text-red-600 hover:underline text-xs"><i class="fa-solid fa-trash"></i> Hapus Permanen</button>
+              </td>
+            </tr>`).join('') || `<tr><td colspan="4" class="text-center py-10 text-slate-400">Sampah kosong</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  if ($('#btnEmptyTrash')) $('#btnEmptyTrash').onclick = async () => {
+    const r = await Swal.fire({ title: 'Kosongkan seluruh Sampah?', text: 'Tindakan ini tidak dapat dibatalkan.', icon: 'warning', showCancelButton: true, confirmButtonColor: '#dc2626' });
+    if (!r.isConfirmed) return;
+    await callApi('emptyTrash', { email: state.user.email });
+    renderTrashView();
+  };
+  document.querySelectorAll('[data-restore]').forEach(b => b.onclick = async () => {
+    await callApi('restoreArchive', { id: b.dataset.restore, actorEmail: state.user.email });
+    renderTrashView();
+  });
+  document.querySelectorAll('[data-perm]').forEach(b => b.onclick = async () => {
+    const r = await Swal.fire({ title: 'Hapus permanen arsip ini?', text: 'Tindakan ini tidak dapat dibatalkan.', icon: 'warning', showCancelButton: true, confirmButtonColor: '#dc2626' });
+    if (!r.isConfirmed) return;
+    await callApi('permanentDeleteArchive', { id: b.dataset.perm, actorEmail: state.user.email });
+    renderTrashView();
+  });
+}
+
+/* ============== REPORTS / EXPORT VIEW ============== */
+async function renderReportsView(){
+  $('#mainContent').innerHTML = `
+    <h2 class="text-xl font-bold mb-2">Laporan / Export</h2>
+    <p class="text-sm text-slate-400 mb-5">Unduh daftar metadata arsip dalam format CSV (Excel-compatible). File dokumen asli tidak ikut diekspor demi keamanan.</p>
+    <div class="bg-white border rounded-xl p-6 max-w-lg">
+      <label class="block text-sm font-medium mb-1">Cakupan</label>
+      <select id="reportScope" class="w-full border rounded-lg px-3 py-2 text-sm mb-4">
+        <option value="">Arsip Pribadi</option>
+        ${state.workspaces.map(w => `<option value="${w.workspaceId}">${w.name}</option>`).join('')}
+      </select>
+      <button id="btnExport" class="bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 rounded-lg text-sm font-semibold"><i class="fa-solid fa-file-csv mr-1"></i>Export ke CSV</button>
+    </div>
+  `;
+  $('#btnExport').onclick = async () => {
+    try {
+      const workspaceId = $('#reportScope').value;
+      const data = await callApi('exportArchivesReport', { email: state.user.email, workspaceId });
+      downloadCsv(data, 'laporan-arsip.csv');
+    } catch (e) { Swal.fire('Gagal Export', humanizeError(e.message), 'error'); }
+  };
+}
+
+function downloadCsv(rows, filename){
+  if (!rows.length) { Swal.fire('Info', 'Tidak ada data untuk diekspor.', 'info'); return; }
+  const headers = Object.keys(rows[0]);
+  const csv = [headers.join(',')].concat(
+    rows.map(r => headers.map(h => `"${String(r[h]).replace(/"/g, '""')}"`).join(','))
+  ).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+/* ============== SETTINGS VIEW ============== */
+function renderSettingsView(){
+  const u = state.user;
+  $('#mainContent').innerHTML = `
+    <h2 class="text-xl font-bold mb-5">Pengaturan</h2>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 max-w-3xl">
+      <div class="bg-white border rounded-xl p-6">
+        <div class="font-semibold text-sm mb-4">Foto Profil</div>
+        <div class="flex items-center gap-4">
+          <img src="${u.profilePic || 'https://api.dicebear.com/7.x/initials/svg?seed='+encodeURIComponent(u.username)}" class="w-16 h-16 rounded-full object-cover bg-slate-200" />
+          <input type="file" id="profilePicInput" accept="image/*" class="text-sm" />
+        </div>
+      </div>
+      <div class="bg-white border rounded-xl p-6">
+        <div class="font-semibold text-sm mb-4">Ganti Kata Sandi</div>
+        <form id="formChangePw" class="space-y-3">
+          <input required type="password" id="oldPw" placeholder="Kata sandi lama" class="w-full border rounded-lg px-3 py-2 text-sm" />
+          <input required type="password" id="newPw" placeholder="Kata sandi baru" class="w-full border rounded-lg px-3 py-2 text-sm" />
+          <button class="bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 rounded-lg text-sm font-semibold">Simpan</button>
+        </form>
+      </div>
+    </div>
+  `;
+  $('#profilePicInput').onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const base64 = await fileToBase64(file);
+    try {
+      await callApi('updateProfilePic', { email: u.email, base64 });
+      u.profilePic = base64; setUser(u);
+      Swal.fire({ icon: 'success', title: 'Foto profil diperbarui', timer: 1200, showConfirmButton: false });
+      renderDashboard();
+    } catch (e2) { Swal.fire('Gagal', humanizeError(e2.message), 'error'); }
+  };
+  $('#formChangePw').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await callApi('changePassword', { email: u.email, oldPassword: $('#oldPw').value, newPassword: $('#newPw').value });
+      Swal.fire('Berhasil', 'Kata sandi diperbarui.', 'success');
+      e.target.reset();
+    } catch (e2) { Swal.fire('Gagal', humanizeError(e2.message), 'error'); }
+  };
 }
 
 /* ============== ADMIN PANEL ============== */
