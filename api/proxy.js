@@ -1,93 +1,59 @@
 // /api/proxy.js — Yor.iAPP Vercel → Google Apps Script proxy
-// Fix utama: GAS /exec melakukan 302 redirect saat POST.
-// fetch() Node.js secara default mengikuti redirect tapi mengubah POST→GET (standar HTTP).
-// Solusi: nonaktifkan auto-redirect, deteksi 302/301, lalu POST ulang ke Location URL.
+//
+// STRATEGI: Kirim payload sebagai query-param ?data=<JSON> via GET.
+// Ini menghindari masalah POST-redirect yang ada di GAS /exec (302 → fetch ubah POST→GET).
+// doGet di Code.gs membaca e.parameter.data dan merutekan sama persis seperti doPost.
 
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbxLtmNQ_VajLZmkCaA9mDVHUtIdq1wk5fNfLk1U9j7dCizSf8J4IwdrBMmJmy6AS-gFFA/exec';
-const MAX_REDIRECTS = 5;
-const TIMEOUT_MS = 55000; // 55 detik (batas Vercel serverless 60 detik)
+const TIMEOUT_MS = 55000;
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
 
-  const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {});
-
   try {
-    const text = req.method === 'GET'
-      ? await gasGet(GAS_URL)
-      : await gasPost(GAS_URL, rawBody);
+    const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {});
+
+    // Kirim sebagai GET + ?data=... supaya redirect diikuti otomatis tanpa mengubah metode
+    const url = GAS_URL + '?data=' + encodeURIComponent(rawBody);
+    const text = await fetchWithTimeout(url, { method: 'GET', redirect: 'follow' }, TIMEOUT_MS);
+
     return parseAndRespond(res, text);
   } catch (err) {
     const msg = err.message || String(err);
-    if (msg === 'TIMEOUT') {
-      return res.status(504).json({ ok: false, error: 'GAS timeout (>55 detik). Coba lagi atau periksa GAS execution log.' });
-    }
+    if (msg === 'TIMEOUT') return res.status(504).json({ ok: false, error: 'GAS timeout. Coba lagi.' });
     return res.status(502).json({ ok: false, error: 'PROXY_ERROR: ' + msg });
   }
 }
 
-async function gasGet(url) {
-  const r = await fetchWithTimeout(url, { method: 'GET', redirect: 'follow' }, TIMEOUT_MS);
-  return r.text();
-}
-
-async function gasPost(url, body, redirectCount = 0) {
-  if (redirectCount > MAX_REDIRECTS) throw new Error('TOO_MANY_REDIRECTS');
-
-  const r = await fetchWithTimeout(url, {
-    method: 'POST',
-    redirect: 'manual',                        // ← kunci: jangan ikuti redirect otomatis
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body
-  }, TIMEOUT_MS);
-
-  // GAS mengembalikan 302 → ikuti redirect dengan POST (bukan GET)
-  if ((r.status === 301 || r.status === 302 || r.status === 303 || r.status === 307 || r.status === 308)) {
-    const location = r.headers.get('location');
-    if (!location) throw new Error('REDIRECT_WITHOUT_LOCATION');
-    // 303 See Other → semantiknya memang GET, tapi GAS butuh POST; coba GET dulu, jika HTML ulangi POST
-    const nextMethod = r.status === 303 ? 'GET' : 'POST';
-    if (nextMethod === 'GET') {
-      // Beberapa deployment GAS 303 ke URL yang langsung mengembalikan JSON via GET
-      const gr = await fetchWithTimeout(location, { method: 'GET', redirect: 'follow' }, TIMEOUT_MS);
-      const text = await gr.text();
-      if (text.trim().startsWith('{')) return text; // berhasil
-      // Jika masih HTML, coba POST ke location
-    }
-    return gasPost(location, body, redirectCount + 1);
+async function fetchWithTimeout(url, opts, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { ...opts, signal: ctrl.signal });
+    return r.text();
+  } finally {
+    clearTimeout(timer);
   }
-
-  return r.text();
-}
-
-function fetchWithTimeout(url, opts, ms) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('TIMEOUT')), ms);
-    fetch(url, opts).then(r => { clearTimeout(timer); resolve(r); }).catch(e => { clearTimeout(timer); reject(e); });
-  });
 }
 
 function parseAndRespond(res, text) {
-  const trimmed = (text || '').trim();
-  if (!trimmed) {
-    return res.status(502).json({ ok: false, error: 'GAS mengembalikan respons kosong. Pastikan deployment sudah di-update ke versi terbaru.' });
-  }
-  if (trimmed.startsWith('<')) {
-    // Cek apakah halaman login/otorisasi Google
-    const isAuthPage = trimmed.includes('accounts.google.com') || trimmed.includes('signin') || trimmed.includes('Authorization');
-    const hint = isAuthPage
-      ? 'Halaman otorisasi Google terdeteksi. Buka URL GAS /exec di browser, izinkan akses, lalu coba lagi.'
-      : 'GAS mengembalikan HTML (bukan JSON). Kemungkinan deployment GAS belum di-update atau ada error di GAS.';
-    return res.status(502).json({ ok: false, error: hint, debug: trimmed.slice(0, 400) });
+  const t = (text || '').trim();
+  if (!t) return res.status(502).json({ ok: false, error: 'GAS mengembalikan respons kosong. Pastikan deployment GAS sudah di-update ke versi terbaru (New version).' });
+  if (t.startsWith('<')) {
+    const isAuth = t.includes('accounts.google.com') || t.includes('signin') || t.includes('ServiceLogin');
+    return res.status(502).json({
+      ok: false,
+      error: isAuth
+        ? 'GAS butuh otorisasi ulang. Buka URL /exec di browser lalu izinkan akses.'
+        : 'GAS mengembalikan HTML. Pastikan deployment di-update ke New Version dan Who has access = Anyone.'
+    });
   }
   try {
-    const json = JSON.parse(trimmed);
-    return res.status(200).json(json);
+    return res.status(200).json(JSON.parse(t));
   } catch {
-    return res.status(502).json({ ok: false, error: 'Respons GAS bukan JSON valid.', debug: trimmed.slice(0, 400) });
+    return res.status(502).json({ ok: false, error: 'Respons GAS bukan JSON valid.', debug: t.slice(0, 300) });
   }
 }
